@@ -6,11 +6,42 @@ import pandas as pd
 from datetime import datetime, timedelta
 from airflow.decorators import dag, task
 
+def send_discord_alert(context):
+    webhook_url = 'https://discord.com/api/webhooks/1477242908053733458/h-bf_mX57sJtAcwn3-3YpdgZBEhQahPX9NCfBvst20v3TLUHbR8VTEE6J-U983wFDyzh' 
+
+    task_instance = context.get('task_instance')
+    task_id = task_instance.task_id
+    dag_id = task_instance.dag_id
+    exec_date = context.get('execution_date').strftime('%Y-%m-%d %H:%M:%S')
+    log_url = task_instance.log_url
+
+    alert_payload = {
+        "username": "Airflow DataOps Bot",
+        "avatar_url": "https://airflow.apache.org/images/feature-image.png",
+        "embeds": [{
+            "title": "Airflow Pipeline Alert: Task Failed!",
+            "color": 16711680,
+            "fields": [
+                {"name": "DAG ID", "value": dag_id, "inline": True},
+                {"name": "Task ID", "value": task_id, "inline": True},
+                {"name": "Execution Time", "value": exec_date, "inline": False},
+                {"name": "Log URL", "value": f"[Click here to view logs]({log_url})", "inline": False}
+            ]
+        }]
+    }
+    
+    response = requests.post(webhook_url, json=alert_payload)
+    if response.status_code == 204:
+        logging.info("Successfully sent Discord alert.")
+    else:
+        logging.error(f"Failed to send Discord alert. Status: {response.status_code}")
+
 # DAG default configuration
 default_args = {
     'owner': 'data_engineer',
-    'retries': 3,
+    'retries': 0,
     'retry_delay': timedelta(minutes=5),
+    'on_failure_callback': send_discord_alert
 }
 
 @dag(
