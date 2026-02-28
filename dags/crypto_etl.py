@@ -16,11 +16,11 @@ default_args = {
 @dag(
     dag_id='crypto_daily_etl',
     default_args=default_args,
-    description='Extracts crypto market data, transforms via Pandas, and loads to PostgreSQL',
+    description='Extracts crypto data, transforms, loads to Silver, and models to Gold layer',
     start_date=datetime(2026, 2, 27),
     schedule_interval='@daily',
     catchup=False,
-    tags=['fintech', 'etl']
+    tags=['fintech', 'etl', 'data-modeling']
 )
 def crypto_etl_pipeline():
 
@@ -28,17 +28,14 @@ def crypto_etl_pipeline():
     def extract_data(**kwargs):
         """Fetch real-time market data from CoinGecko API."""
         url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd&include_market_cap=true&include_24hr_vol=true"
-        
         response = requests.get(url, timeout=10)
         response.raise_for_status()
-        
         return response.json()
 
     @task()
     def transform_data(raw_data: dict, **kwargs):
         """Convert nested JSON to a structured DataFrame and enforce data types."""
         logical_date = kwargs['ds']
-        
         records = []
         for coin, metrics in raw_data.items():
             records.append({
@@ -48,32 +45,19 @@ def crypto_etl_pipeline():
                 'market_cap_usd': metrics.get('usd_market_cap'),
                 'volume_24h_usd': metrics.get('usd_24h_vol')
             })
-        
         df = pd.DataFrame(records)
-        
-        # Stage the cleaned data locally (Silver layer simulation)
         output_path = f"/opt/airflow/dags/crypto_silver_{logical_date}.csv"
         df.to_csv(output_path, index=False)
-        
         logging.info(f"Successfully transformed {len(df)} records. Saved to {output_path}")
         return output_path
 
     @task()
     def load_data(file_path: str, **kwargs):
-        """Load the staged CSV data into PostgreSQL with UPSERT logic for idempotency."""
-        # Read the staged data
+        """Load the staged CSV data into PostgreSQL Silver Layer with UPSERT logic."""
         df = pd.read_csv(file_path)
-        
-        # Connect to PostgreSQL (Internal Docker Network)
-        conn = psycopg2.connect(
-            host="postgres",
-            database="airflow",
-            user="airflow",
-            password="airflow"
-        )
+        conn = psycopg2.connect(host="postgres", database="airflow", user="airflow", password="airflow")
         cursor = conn.cursor()
         
-        # Define table schema (Silver Layer)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS crypto_silver (
                 logical_date DATE,
@@ -85,18 +69,14 @@ def crypto_etl_pipeline():
             );
         """)
         
-        # UPSERT logic: Insert new or update existing based on Primary Key
         insert_query = """
             INSERT INTO crypto_silver (logical_date, coin_id, price_usd, market_cap_usd, volume_24h_usd)
             VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (logical_date, coin_id) 
-            DO UPDATE SET 
+            ON CONFLICT (logical_date, coin_id) DO UPDATE SET 
                 price_usd = EXCLUDED.price_usd,
                 market_cap_usd = EXCLUDED.market_cap_usd,
                 volume_24h_usd = EXCLUDED.volume_24h_usd;
         """
-        
-        # Convert DataFrame rows to list of tuples for batch execution
         records = [tuple(x) for x in df.to_numpy()]
         cursor.executemany(insert_query, records)
         
@@ -104,16 +84,57 @@ def crypto_etl_pipeline():
         cursor.close()
         conn.close()
         
-        # Clean up the staging file to save space
         if os.path.exists(file_path):
             os.remove(file_path)
-            
-        logging.info(f"Successfully loaded {len(df)} records and cleaned up staging file.")
+        logging.info("Successfully loaded data to Silver Layer.")
 
-    # Define the execution pipeline using TaskFlow API
+    @task()
+    def create_gold_layer(**kwargs):
+        """Aggregate data from Silver Layer to Gold Layer for Business Intelligence."""
+        logical_date = kwargs['ds']
+        conn = psycopg2.connect(host="postgres", database="airflow", user="airflow", password="airflow")
+        cursor = conn.cursor()
+        
+        # Define table schema (Gold Layer)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS crypto_gold (
+                logical_date DATE PRIMARY KEY,
+                btc_price_usd NUMERIC(18, 6),
+                eth_price_usd NUMERIC(18, 6),
+                btc_eth_market_cap_ratio NUMERIC(10, 4)
+            );
+        """)
+        
+        # Advanced SQL: Conditional Aggregation (Pivot) & Math Calculation
+        upsert_gold_query = """
+            INSERT INTO crypto_gold (logical_date, btc_price_usd, eth_price_usd, btc_eth_market_cap_ratio)
+            SELECT 
+                logical_date,
+                MAX(CASE WHEN coin_id = 'bitcoin' THEN price_usd END) AS btc_price_usd,
+                MAX(CASE WHEN coin_id = 'ethereum' THEN price_usd END) AS eth_price_usd,
+                MAX(CASE WHEN coin_id = 'bitcoin' THEN market_cap_usd END) / 
+                NULLIF(MAX(CASE WHEN coin_id = 'ethereum' THEN market_cap_usd END), 0) AS btc_eth_market_cap_ratio
+            FROM crypto_silver
+            WHERE logical_date = %s
+            GROUP BY logical_date
+            ON CONFLICT (logical_date) DO UPDATE SET 
+                btc_price_usd = EXCLUDED.btc_price_usd,
+                eth_price_usd = EXCLUDED.eth_price_usd,
+                btc_eth_market_cap_ratio = EXCLUDED.btc_eth_market_cap_ratio;
+        """
+        cursor.execute(upsert_gold_query, (logical_date,))
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        logging.info("Successfully modeled data into Gold Layer.")
+
+    # TaskFlow API execution order
     raw_crypto_data = extract_data()
     staged_file_path = transform_data(raw_crypto_data)
-    load_data(staged_file_path)
+    
+    # load_data does not return a value, so we use bitshift operator (>>) to set downstream dependency
+    load_data(staged_file_path) >> create_gold_layer()
 
 # Instantiate the DAG
 crypto_etl_pipeline()
