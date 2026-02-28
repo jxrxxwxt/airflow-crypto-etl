@@ -1,0 +1,8 @@
+# Airflow specific
+logs/
+.env
+
+# Python specific
+__pycache__/
+*.pyc
+.pytest_cache/
