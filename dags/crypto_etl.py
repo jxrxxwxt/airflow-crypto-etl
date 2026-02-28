@@ -7,8 +7,12 @@ from datetime import datetime, timedelta
 from airflow.decorators import dag, task
 
 def send_discord_alert(context):
-    webhook_url = 'https://discord.com/api/webhooks/1477242908053733458/h-bf_mX57sJtAcwn3-3YpdgZBEhQahPX9NCfBvst20v3TLUHbR8VTEE6J-U983wFDyzh' 
-
+    webhook_url = os.getenv('DISCORD_WEBHOOK_URL') 
+    
+    if not webhook_url:
+        logging.warning("Discord Webhook URL is not configured in Environment Variables.")
+        return
+    
     task_instance = context.get('task_instance')
     task_id = task_instance.task_id
     dag_id = task_instance.dag_id

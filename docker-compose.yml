@@ -71,6 +71,8 @@ services:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
+    environment:
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
 
   # 4. Airflow Scheduler (The Brain)
   airflow-scheduler:
@@ -81,6 +83,8 @@ services:
         condition: service_healthy
       airflow-init:
         condition: service_completed_successfully
+    environment:
+      - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL}
 
 volumes:
   postgres_data:

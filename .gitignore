@@ -2,6 +2,8 @@
 logs/
 .env
 
+*.csv
+
 # Python specific
 __pycache__/
 *.pyc
